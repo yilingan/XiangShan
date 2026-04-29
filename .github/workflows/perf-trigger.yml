@@ -55,9 +55,14 @@ on:
           - gcc12-spec06-0.8c
           - gcc12-spec06-1.0c
           - custom
+          - dryrun
         default: gcc15-spec06-1.0c
       benchmarks:
         description: Specific benchmarks to run (comma-separated), leave empty to run all
+        required: false
+        type: string
+      cst_file:
+        description: Constantin file path (empty for default init setting, or file path for specific file)
         required: false
         type: string
       servers:
@@ -83,6 +88,7 @@ jobs:
         xs_config: ${{ github.event.inputs.xs_config }}
         benchmark_type: ${{ github.event.inputs.benchmark_type }}
         benchmarks: ${{ github.event.inputs.benchmarks }}
+        cst_file: ${{ github.event.inputs.cst_file }}
         servers: ${{ github.event.inputs.servers }}
         checkpoint_path: ${{ github.event.inputs.checkpoint_path }}
         json_path: ${{ github.event.inputs.json_path }}
