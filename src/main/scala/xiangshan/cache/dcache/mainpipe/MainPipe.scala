@@ -303,8 +303,17 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
 
   // s1: read data
   val s1_valid = RegInit(false.B)
-  val s1_need_data = RegEnable(banked_need_data, s0_fire)
   val s1_req = RegEnable(s0_req, s0_fire)
+
+  val meta_resp = Wire(Vec(nWays, (new Meta).asUInt))
+  val s1_repl_way_en = WireInit(0.U(nWays.W))
+  val s1_repl_coh = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => meta_resp(w))).asTypeOf(new ClientMetadata)
+  val s1_need_data = if (dcacheParameters.alwaysReleaseData) {
+    RegEnable(banked_need_data, s0_fire)
+  } else {
+    Mux(!s1_req.miss, RegEnable(banked_need_data, s0_fire), s1_repl_coh.state === ClientStates.Dirty)
+  }
+
   val s1_banked_rmask = RegEnable(s0_banked_rmask, s0_fire)
   val s1_banked_store_wmask = RegEnable(banked_store_wmask, s0_fire)
   val s1_need_tag = RegEnable(s0_need_tag, s0_fire)
@@ -323,7 +332,6 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   s1_s0_set_conflict_store := s1_valid && store_idx === s1_idx
 
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until nWays).map(f))
-  val meta_resp = Wire(Vec(nWays, (new Meta).asUInt))
   meta_resp := Mux(GatedValidRegNext(s0_fire), VecInit(io.meta_resp.map(_.asUInt)), RegEnable(meta_resp, s1_valid))
   // pseudo ecc enc tag
   val pseudo_tag_toggle_mask = Mux(
@@ -373,37 +381,30 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   val s1_invalid_vec = wayMap(w => !meta_resp(w).asTypeOf(new Meta).coh.isValid())
   val s1_have_invalid_way = s1_invalid_vec.asUInt.orR
   val s1_invalid_way_en = ParallelPriorityMux(s1_invalid_vec.zipWithIndex.map(x => x._1 -> UIntToOH(x._2.U(nWays.W))))
-  val s1_repl_way_en = WireInit(0.U(nWays.W))
   s1_repl_way_en := Mux(
     GatedValidRegNext(s0_fire),
-    Mux(
-      io.pseudo_error.valid && s1_has_real_tag_eq_way,
-      s1_real_tag_match_way_en,
-      Mux(s1_req.miss_fail_cause_evict_btot, s1_req.occupy_way, UIntToOH(io.replace_way.way)
-    )),
+    Mux(s1_req.miss_fail_cause_evict_btot, s1_req.occupy_way, UIntToOH(io.replace_way.way)),
     RegEnable(s1_repl_way_en, s1_valid)
   )
   val s1_repl_way = Wire(UInt(wayBits.W))
   s1_repl_way := Mux(
     GatedValidRegNext(s0_fire),
-    Mux(
-      io.pseudo_error.valid && s1_has_real_tag_eq_way,
-      s1_real_tag_match_way,
-      Mux(s1_req.miss_fail_cause_evict_btot, OHToUInt(s1_req.occupy_way), io.replace_way.way)
-    ),
+    Mux(s1_req.miss_fail_cause_evict_btot, OHToUInt(s1_req.occupy_way), io.replace_way.way),
     RegEnable(s1_repl_way, s1_valid)
   ) // UInt format of `s1_repl_way_en`
-  val s1_repl_tag = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => tag_resp(w)))
-  val s1_repl_coh = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => meta_resp(w))).asTypeOf(new ClientMetadata)
+  val s1_repl_tag = ParallelMux(Mux(io.pseudo_error.valid && s1_has_real_tag_eq_way, s1_real_tag_match_way_en, s1_repl_way_en).asBools,
+                                (0 until nWays).map(w => tag_resp(w)))
   val s1_repl_pf  = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => io.extra_meta_resp(w).prefetch))
 
-  val s1_real_tag = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => io.tag_resp(w)))
+  val s1_real_tag = ParallelMux(s1_real_tag_match_way_en.asBools, (0 until nWays).map(w => io.tag_resp(w)))
 
   val s1_need_replacement = s1_req.miss && !s1_tag_match
   val s1_need_eviction = s1_req.miss && !s1_tag_match && s1_repl_coh.state =/= ClientStates.Nothing
 
-  val s1_way_en = Mux(io.pseudo_error.valid || s1_need_replacement, s1_repl_way_en, s1_tag_ecc_match_way)
-  val s1_way = Mux(io.pseudo_error.valid || s1_need_replacement, s1_repl_way, OHToUInt(s1_tag_ecc_match_way))
+  val s1_way_en = Mux(io.pseudo_error.valid && s1_has_real_tag_eq_way, s1_real_tag_match_way_en, 
+                      Mux(s1_need_replacement, s1_repl_way_en, s1_tag_ecc_match_way))
+  val s1_way = Mux(io.pseudo_error.valid && s1_has_real_tag_eq_way, s1_real_tag_match_way,
+                   Mux(s1_need_replacement, s1_repl_way, OHToUInt(s1_tag_ecc_match_way)))
   assert(!RegNext(s1_fire && PopCount(s1_way_en) > 1.U))
 
   val s1_tag = s1_hit_tag
