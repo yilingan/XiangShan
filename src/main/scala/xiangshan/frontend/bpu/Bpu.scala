@@ -199,15 +199,23 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   io.fromFtq.train.ready := predictors.map(_.io.trainReady).reduce(_ && _)
 
   /* *** predictor specific inputs *** */
-  abtb.io.redirectValid := redirect.valid
-  abtb.io.overrideValid := s3_override
+  abtb.io.redirectValid  := redirect.valid
+  abtb.io.overrideValid  := s3_override
+  abtb.io.normalPathHist := phr.io.oldFoldedPhr
 
-  utage.io.foldedPathHist         := phr.io.s0_foldedPhr
-  utage.io.foldedPathHistForTrain := phr.io.trainFoldedPhr
-  utage.io.abtbPrediction         := abtb.io.abtbResult
-  utage.io.abtbPosVec             := abtb.io.abtbPos
-  utage.io.overrideValid          := s3_override
-  utage.io.redirectValid          := redirect.valid
+  // utage.io.foldedPathHist         := phr.io.oldFoldedPhr
+  // utage.io.foldedPathHistForTrain := phr.io.trainFoldedPhr
+  utage.io.abtbPrediction := abtb.io.abtbResult
+  utage.io.abtbPosVec     := abtb.io.abtbPos
+  utage.io.overrideValid  := s3_override
+  utage.io.redirectValid  := redirect.valid
+
+  utage.io.normalPathHist   := phr.io.oldFoldedPhr
+  utage.io.s1PathHist       := phr.io.s1_foldedPhr
+  utage.io.overridePathHist := phr.io.s3_foldedPhr
+
+  utage.io.s1StartPc       := s1_prediction.target
+  utage.io.overrideStartPc := s3_prediction.target
 
   // uras
   uras.io.specIn.startPc                := s1_startPc
