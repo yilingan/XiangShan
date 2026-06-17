@@ -87,7 +87,7 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
     val pseudo_tag_error_inj_done = Output(Bool())
     val pseudo_data_error_inj_done = Output(Bool())
 
-    val prefetch_stat = Output(new LoadPrefetchStatBundle)
+    val prefetch_stat = Output(new PipePrefetchStatBundle)
 
     val bloom_filter_query = new Bundle {
       val query = ValidIO(new BloomQueryBundle(BLOOM_FILTER_ENTRY_NUM))

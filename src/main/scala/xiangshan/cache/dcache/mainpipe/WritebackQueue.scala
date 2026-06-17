@@ -319,9 +319,10 @@ class WritebackQueue(edge: TLEdgeOut)(implicit p: Parameters) extends DCacheModu
     //val probe_ttob_check_req = Flipped(ValidIO(new ProbeToBCheckReq))
     //val probe_ttob_check_resp = ValidIO(new ProbeToBCheckResp)
 
-    // 5 miss_req to check: 3*LoadPipe + 1*MainPipe + 1*missReqArb_out
-    val miss_req_conflict_check = Vec(LoadPipelineWidth + 2, Flipped(Valid(UInt())))
-    val block_miss_req = Vec(LoadPipelineWidth + 2, Output(Bool()))
+    // align with DCacheWrapper MissReqPortCount:
+    // main pipe * 1 + load pipe * LduCnt + store pipe * StaCnt (optional) + hybrid * HyuCnt
+    val miss_req_conflict_check = Vec(MissReqPortCount, Flipped(Valid(UInt())))
+    val block_miss_req = Vec(MissReqPortCount, Output(Bool()))
   })
 
   require(cfg.nReleaseEntries > cfg.nMissEntries)
@@ -392,13 +393,16 @@ class WritebackQueue(edge: TLEdgeOut)(implicit p: Parameters) extends DCacheModu
   // print req
   io.req.bits.dump(io.req.fire)
 
-  io.mem_grant.bits.dump(io.mem_release.fire)
+  io.mem_grant.bits.dump(io.mem_grant.fire)
 
   // XSDebug(io.miss_req.valid, "miss_req: addr: %x\n", io.miss_req.bits)
   // XSDebug(io.block_miss_req, "block_miss_req\n")
 
   // performance counters
   XSPerfAccumulate("wb_req", io.req.fire)
+  for(i <- 0 until MissReqPortCount) {
+    XSPerfAccumulate(s"block_miss_req_$i", io.block_miss_req(i))
+  }
 
   val perfValidCount = RegNext(PopCount(entries.map(e => e.io.block_addr.valid)))
   val perfEvents = Seq(

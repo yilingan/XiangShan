@@ -17,7 +17,7 @@ class PrefetchControlBundle()(implicit p: Parameters) extends XSBundle with HasS
   val confidence = UInt(1.W)
 }
 
-class LoadPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
+class PipePrefetchStatBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
   val total_prefetch = Bool() // from loadpipe s2, pf req sent
   val pf_late_in_cache = Bool() // from loadpipe s2, pf req sent but hit
   val pf_late_in_cache_source = UInt(L1PfSourceBits.W) // from loadpipe s2, pf req sent but hit, hit's source
@@ -31,20 +31,7 @@ class LoadPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with Has
   val pollution = Bool() // from loadpipe s2, bloom filter speculate pollution
 }
 
-class MainPipePrefetchStatBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
-  val total_prefetch = Bool() // from mainpipe s2, pf req sent
-  val pf_late_in_cache = Bool() // from mainpipe s2, pf req sent but hit
-  val nack_prefetch = Bool() // from mainpipe s2, pf req miss but nack
-  val pf_source = UInt(L1PfSourceBits.W)
-
-  val hit_pf_in_cache = Bool() // DontCare: mainpipe only has prefet_req, do not have load_req
-  val hit_source = UInt(L1PfSourceBits.W)
-
-  val demand_miss = Bool() // DontCare: same as above
-  val pollution = Bool() // DontCare: same as above
-}
-
-class MainPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
+class ReplPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
   val pf_useless = Bool() // from mainpipe replace, prefetch block but not accessed
   val pf_source_useless = UInt(L1PfSourceBits.W)
 
@@ -58,16 +45,16 @@ class MissPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with Has
   val prefetch_miss = Bool() // from missqueue, pf req allocate a new mshr
   val pf_source = UInt(L1PfSourceBits.W)
 
-  val hit_pf_in_mshr = Bool() // from missqueue, demand miss match a existing pf mshr, then clear pf flag
-  val hit_pf_in_mshr_source = UInt(L1PfSourceBits.W) // from missqueue, the pf source of demand miss matched
-  val load_miss = Bool() // from missqueue, load demand miss allocate a new mshr
+  val hit_pf_in_mshr = UInt(MissReqPortCount.W) // from missqueue, demand miss match a existing pf mshr, then clear pf flag
+  val hit_pf_in_mshr_source = Vec(MissReqPortCount, UInt(L1PfSourceBits.W)) // from missqueue, the pf source of demand miss matched
+  val load_miss = UInt(MissReqPortCount.W) // from missqueue, load demand miss allocate a new mshr
 }
 
 class PrefetcherMonitorBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
-  val loadinfo = Input(Vec(LoadPipelineWidth, new LoadPrefetchStatBundle))
+  val loadinfo = Input(Vec(LoadPipelineWidth, new PipePrefetchStatBundle))
+  val maininfo = Input(new PipePrefetchStatBundle)
   val missinfo = Input(new MissPrefetchStatBundle)
-  val mainpipeinfo = Input(new MainPipePrefetchStatBundle)
-  val maininfo = Input(new MainPrefetchStatBundle)
+  val replinfo = Input(new ReplPrefetchStatBundle)
 
   val clear_flag = Input(Vec(LoadPipelineWidth, Bool()))
 
@@ -82,8 +69,8 @@ class PrefetcherMonitor()(implicit p: Parameters) extends XSModule with HasStrea
   val prefetch_info = Wire(new L1PrefetchStatisticBundle)
   prefetch_info.loadinfo := io.loadinfo 
   prefetch_info.missinfo := io.missinfo
-  prefetch_info.mainpipeinfo := io.mainpipeinfo
   prefetch_info.maininfo := io.maininfo
+  prefetch_info.replinfo := io.replinfo
 
   for (i <- 0 until LoadPipelineWidth) {
     when(io.clear_flag(i)) {
@@ -104,9 +91,9 @@ class PrefetcherMonitor()(implicit p: Parameters) extends XSModule with HasStrea
   io.pf_ctrl(1) := StrideMonitor.io.pf_ctrl
 
   // ldu 0, 1, 2 can only have one prefetch request at a time
-  val total_prefetch = io.loadinfo.map(t => t.total_prefetch).reduce(_ || _) || io.mainpipeinfo.total_prefetch
-  val nack_prefetch_raw = io.loadinfo.map(t => t.nack_prefetch).reduce(_ || _) || io.mainpipeinfo.nack_prefetch
-  val pf_late_in_cache = io.loadinfo.map(t => t.pf_late_in_cache).reduce(_ || _) || io.mainpipeinfo.pf_late_in_cache
+  val total_prefetch = io.loadinfo.map(t => t.total_prefetch).reduce(_ || _) || io.maininfo.total_prefetch
+  val nack_prefetch_raw = io.loadinfo.map(t => t.nack_prefetch).reduce(_ || _) || io.maininfo.nack_prefetch
+  val pf_late_in_cache = io.loadinfo.map(t => t.pf_late_in_cache).reduce(_ || _) || io.maininfo.pf_late_in_cache
   val pf_late_in_mshr = io.missinfo.pf_late_in_mshr
   val nack_prefetch = nack_prefetch_raw && !pf_late_in_mshr
   val pf_late = pf_late_in_cache.asUInt + pf_late_in_mshr.asUInt
@@ -114,7 +101,7 @@ class PrefetcherMonitor()(implicit p: Parameters) extends XSModule with HasStrea
   val hit_pf_in_cache = PopCount(prefetch_info.loadinfo.map(t => t.hit_pf_in_cache) ++ Seq(prefetch_info.maininfo.hit_pf_in_cache))
   val hit_pf_in_mshr = io.missinfo.hit_pf_in_mshr
   val hit_pf = hit_pf_in_cache + hit_pf_in_mshr.asUInt
-  val pf_useless = io.maininfo.pf_useless
+  val pf_useless = io.replinfo.pf_useless
   val prefetch_miss = io.missinfo.prefetch_miss
   val load_miss_to_mshr = io.missinfo.load_miss
   // ldu 0, 1, 2 can have multiple demand accesses at a time
@@ -162,10 +149,10 @@ class PrefetcherMonitor()(implicit p: Parameters) extends XSModule with HasStrea
 }
 
 class L1PrefetchStatisticBundle()(implicit p: Parameters) extends XSBundle {
-  val loadinfo = Vec(LoadPipelineWidth, new LoadPrefetchStatBundle)
+  val loadinfo = Vec(LoadPipelineWidth, new PipePrefetchStatBundle)
+  val maininfo = new PipePrefetchStatBundle
   val missinfo = new MissPrefetchStatBundle
-  val mainpipeinfo = new MainPipePrefetchStatBundle
-  val maininfo = new MainPrefetchStatBundle
+  val replinfo = new ReplPrefetchStatBundle
 }
 
 class L1PrefetchMonitorBundle()(implicit p: Parameters) extends XSBundle {
@@ -209,17 +196,17 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val back_off_reset = back_off_cnt === param.BACK_OFF_INTERVAL.U
   val conf_reset = low_conf_cnt === param.LOW_CONF_INTERVAL.U
 
-  val total_prefetch = io.prefetch_info.loadinfo.map(t => t.total_prefetch && param.isMyType(t.pf_source)).reduce(_ || _) || (io.prefetch_info.mainpipeinfo.total_prefetch && param.isMyType(io.prefetch_info.mainpipeinfo.pf_source))
-  val pf_late_in_cache = io.prefetch_info.loadinfo.map(t => t.pf_late_in_cache && param.isMyType(t.pf_source)).reduce(_ || _) || (io.prefetch_info.mainpipeinfo.pf_late_in_cache && param.isMyType(io.prefetch_info.mainpipeinfo.pf_source))
-  val nack_prefetch_raw = io.prefetch_info.loadinfo.map(t => t.nack_prefetch && param.isMyType(t.pf_source)).reduce(_ || _) || (io.prefetch_info.mainpipeinfo.nack_prefetch && param.isMyType(io.prefetch_info.mainpipeinfo.pf_source))
+  val total_prefetch = io.prefetch_info.loadinfo.map(t => t.total_prefetch && param.isMyType(t.pf_source)).reduce(_ || _) || (io.prefetch_info.maininfo.total_prefetch && param.isMyType(io.prefetch_info.maininfo.pf_source))
+  val pf_late_in_cache = io.prefetch_info.loadinfo.map(t => t.pf_late_in_cache && param.isMyType(t.pf_source)).reduce(_ || _) || (io.prefetch_info.maininfo.pf_late_in_cache && param.isMyType(io.prefetch_info.maininfo.pf_source))
+  val nack_prefetch_raw = io.prefetch_info.loadinfo.map(t => t.nack_prefetch && param.isMyType(t.pf_source)).reduce(_ || _) || (io.prefetch_info.maininfo.nack_prefetch && param.isMyType(io.prefetch_info.maininfo.pf_source))
   val pf_late_in_mshr = io.prefetch_info.missinfo.pf_late_in_mshr && param.isMyType(io.prefetch_info.missinfo.pf_source)
   val nack_prefetch = nack_prefetch_raw && !pf_late_in_mshr
-  val hit_pf_in_cache = PopCount(io.prefetch_info.loadinfo.map(t => t.hit_pf_in_cache && param.isMyType(t.hit_source)) ++ Seq(io.prefetch_info.maininfo.hit_pf_in_cache && param.isMyType(io.prefetch_info.maininfo.hit_pf_source_in_cache)))
-  val pf_useless = io.prefetch_info.maininfo.pf_useless && param.isMyType(io.prefetch_info.maininfo.pf_source_useless)
+  val hit_pf_in_cache = PopCount(io.prefetch_info.loadinfo.map(t => t.hit_pf_in_cache && param.isMyType(t.hit_source)) ++ Seq(io.prefetch_info.maininfo.hit_pf_in_cache && param.isMyType(io.prefetch_info.replinfo.hit_pf_source_in_cache)))
+  val pf_useless = io.prefetch_info.replinfo.pf_useless && param.isMyType(io.prefetch_info.replinfo.pf_source_useless)
   val prefetch_miss = io.prefetch_info.missinfo.prefetch_miss && param.isMyType(io.prefetch_info.missinfo.pf_source)
-  val hit_pf_in_mshr = io.prefetch_info.missinfo.hit_pf_in_mshr && param.isMyType(io.prefetch_info.missinfo.hit_pf_in_mshr_source)
-  val hit_pf = hit_pf_in_cache + hit_pf_in_mshr.asUInt
-  val pf_late = pf_late_in_cache.asUInt + pf_late_in_mshr.asUInt
+  val hit_pf_in_mshr = PopCount((0 until MissReqPortCount).map(i => io.prefetch_info.missinfo.hit_pf_in_mshr(i) && param.isMyType(io.prefetch_info.missinfo.hit_pf_in_mshr_source(i))))
+  val hit_pf = hit_pf_in_cache + hit_pf_in_mshr
+  val pf_late = pf_late_in_cache.asUInt + pf_late_in_mshr
 
   total_prefetch_cnt := Mux(timely_reset, 0.U, total_prefetch_cnt + total_prefetch)
   pf_late_in_cache_cnt := Mux(timely_reset, 0.U, pf_late_in_cache_cnt + pf_late_in_cache)

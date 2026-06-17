@@ -167,7 +167,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     // hardware prefetch
     val prefetch_req = Flipped(Decoupled(new L1PrefetchReq()))
     // pass to Prefetch Monitor for statistic
-    val prefetch_stat = Output(new MainPipePrefetchStatBundle)
+    val prefetch_stat = Output(new PipePrefetchStatBundle)
 
     // data sram
     val data_read = Vec(LoadPipelineWidth, Input(Bool()))
@@ -402,6 +402,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
 
   val s1_hit_tag = get_tag(s1_req.addr)
   val s1_hit_coh = ClientMetadata(ParallelMux(s1_tag_ecc_match_way.asBools, (0 until nWays).map(w => meta_resp(w))))
+  val s1_hit_prefetch = ParallelMux(s1_tag_ecc_match_way.asBools, (0 until nWays).map(w => io.extra_meta_resp(w).prefetch))
   val s1_extra_meta = Wire(io.extra_meta_resp.head.cloneType)
   s1_extra_meta := Mux(
     GatedValidRegNext(s0_fire),
@@ -468,6 +469,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   val s2_has_permission = RegEnable(s1_has_permission, s1_fire)
   val s2_new_hit_coh = RegEnable(s1_new_hit_coh, s1_fire)
   val s2_grow_perm = RegEnable(s1_grow_perm, s1_fire) && s2_tag_match
+  val s2_hit_prefetch = RegEnable(s1_hit_prefetch, s1_fire)
 
   val s2_repl_tag = RegEnable(s1_repl_tag, s1_fire)
   val s2_repl_coh = RegEnable(s1_repl_coh, s1_fire)
@@ -954,6 +956,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
 
   io.prefetch_stat.total_prefetch := total_prefetch
   io.prefetch_stat.pf_late_in_cache := pf_late_in_cache
+  io.prefetch_stat.pf_late_in_cache_source := s2_hit_prefetch
   io.prefetch_stat.nack_prefetch := s2_valid && s2_can_go_to_mq && !io.miss_req.ready && s2_isPrefetch
   io.prefetch_stat.pf_source := s2_req.pf_source
   io.prefetch_stat.hit_pf_in_cache := DontCare
