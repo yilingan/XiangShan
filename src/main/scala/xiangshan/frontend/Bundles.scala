@@ -324,7 +324,7 @@ class FetchToIBuffer(implicit p: Parameters) extends FrontendBundle {
   val exceptionType:      ExceptionType = new ExceptionType
   val isBackendException: Bool          = Bool()
   val exceptionCrossPage: Bool          = Bool()
-  val exceptionOffset:    UInt          = UInt(log2Ceil(IBufferEnqueueWidth).W)
+  val exceptionMask:      Vec[Bool]     = Vec(IBufferEnqueueWidth, Bool())
 
   val triggered:        Vec[UInt] = Vec(IBufferEnqueueWidth, TriggerAction())
   val isLastInFtqEntry: Vec[Bool] = Vec(IBufferEnqueueWidth, Bool())

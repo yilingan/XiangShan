@@ -643,10 +643,10 @@ class Ifu(implicit p: Parameters) extends IfuModule
   // if icache respond with exception, it's marked on entire cacheline,
   // so the first enqueued instr should be marked with exception
   // otherwise, we only have rvcException, so select its offset
-  io.toIBuffer.bits.exceptionOffset := Mux(
+  io.toIBuffer.bits.exceptionMask := Mux(
     s3_icacheMeta(0).exception.hasException,
-    s3_shiftNum.pad(log2Ceil(IBufferEnqueueWidth)),
-    s3_rvcExceptionOffset
+    VecInit.tabulate(IBufferEnqueueWidth)(i => if (i < IfuAlignWidth) i.U === s3_shiftNum else false.B),
+    VecInit.tabulate(IBufferEnqueueWidth)(i => enq(i) & s3_alignRvcIll(i))
   )
 
   io.toIBuffer.bits.triggered := s3_alignTriggered
@@ -721,7 +721,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
     // execption can happen in next page only when cross page.
     io.toIBuffer.bits.exceptionCrossPage :=
       s3_prevLastIsHalfRvi && (s3_icacheMeta(0).exception.hasException || uncacheException.hasException)
-    io.toIBuffer.bits.exceptionOffset := s3_shiftNum.pad(log2Ceil(IBufferEnqueueWidth))
+    io.toIBuffer.bits.exceptionMask := VecInit.tabulate(IBufferEnqueueWidth) { i =>
+      if (i < IfuAlignWidth) i.U === s3_shiftNum else false.B
+    }
 
     // The s3_alignBlockStartPos vector marks the position of the first instruction.
     // In uncache scenarios, only a single instruction is allowed for execution,

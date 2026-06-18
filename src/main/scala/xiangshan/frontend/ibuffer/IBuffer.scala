@@ -102,7 +102,8 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   private val deqPtr        = deqPtrVec(0)
 
   private val enqPtrVec = RegInit(VecInit.tabulate(EnqueueWidth)(_.U.asTypeOf(new IBufPtr)))
-  private val enqPtr    = enqPtrVec(0)
+  private val enqPtrDup = RegInit(VecInit.fill(EnqPtrDupNum)(0.U.asTypeOf(new IBufPtr)))
+  private val enqPtr    = enqPtrDup(0)
   // Use the IFU-IBuffer interaction to pre-determine the queue position for each instruction output by IFU.
   private val ifuAlignedEnqPtrVec = RegInit(VecInit.tabulate(EnqueueWidth)(_.U.asTypeOf(new IBufPtr)))
 
@@ -166,8 +167,8 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   private val deqExceptionOffset = Wire(UInt(log2Ceil(DecodeWidth).W))
 
   // Current Exception Wire
-  private val currentException       = Wire(new IBufExceptionEntry).fromFetch(io.in.bits)
-  private val currentExceptionOffset = enqOffset(io.in.bits.exceptionOffset)
+  private val currentException  = Wire(new IBufExceptionEntry).fromFetch(io.in.bits)
+  private val enqExceptionIndex = PriorityEncoder(io.in.bits.exceptionMask)
 
   private val outputEntriesIsNotFull = !outputEntries(DecodeWidth - 1).valid
   private val numBypass              = Wire(UInt(DecodeWidth.U.getWidth.W))
@@ -198,18 +199,44 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // Bypass
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  // timing optimization：
+  // Bypass selection relies on the IFU-to-IBuffer pre-alignment contract:
+  // valid instructions from IFU are packed contiguously after the leading
+  // bank-alignment bubbles. The low bits of enqPtr identify the write-bank
+  // offset of the first valid instruction.
+  //
+  // Example with NumWriteBank = 4 and bankOffset = 3:
+  // lane index:  0 1 2 3 4 5 6 7 8 ...
+  // valid mark:  0 0 0 1 1 1 1 1 0 ...
+  //
+  // In general, bypass entry idx selects lane idx + bankOffset from the
+  // sliding window [idx, idx + NumWriteBank - 1]. This avoids computing
+  // enqOffset with a prefix PopCount on the bypass path.
+  private val bypassExceptionMask = Wire(Vec(DecodeWidth, Bool()))
   bypassEntries.zipWithIndex.foreach { case (entry, idx) =>
-    // Select
-    val validOH = (0 until MaxBypassNum).map { i =>
-      io.in.bits.valid(i) &&
-      io.in.bits.enqEnable(i) &&
-      enqOffset(i) === idx.asUInt
-    } // Should be OneHot
-    entry.valid := validOH.reduce(_ || _) && io.in.fire && !io.flush
-    entry.bits  := Mux1H(validOH, enqData.take(MaxBypassNum))
+    val bankOffset = enqPtrDup(2).value(log2Ceil(NumWriteBank) - 1, 0)
+    val bankOH     = UIntToOH(bankOffset, NumWriteBank)
 
-    // Debug Assertion
-    XSError(io.in.valid && PopCount(validOH) > 1.asUInt, "validOH is not OneHot")
+    val selectedValid = Mux1H(
+      bankOH,
+      VecInit.tabulate(NumWriteBank)(i =>
+        io.in.bits.valid(i + idx) && io.in.bits.enqEnable(i + idx)
+      )
+    )
+
+    entry.valid := selectedValid && io.in.fire && !io.flush
+    entry.bits := Mux1H(
+      bankOH,
+      VecInit.tabulate(NumWriteBank)(i =>
+        enqData(i + idx)
+      )
+    )
+    bypassExceptionMask(idx) := Mux1H(
+      bankOH,
+      VecInit.tabulate(NumWriteBank)(i =>
+        io.in.bits.exceptionMask(i + idx) && io.in.bits.valid(i + idx) && io.in.bits.enqEnable(i + idx)
+      )
+    )
   }
 
   // => Decode Output
@@ -223,7 +250,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
       when(useBypass && io.in.valid) {
         out.valid := bypass.valid
         out.bits := Mux(
-          i.U === currentExceptionOffset,
+          bypassExceptionMask(i),
           bypass.bits.toIBufOutEntry(currentException),
           bypass.bits.toIBufOutEntry(0.U.asTypeOf(currentException))
         )
@@ -286,11 +313,14 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   //
   // This assumes the IBuffer size is compatible with NumWriteBank, so the pointer
   // low-bit bank cycle is preserved across wrap-around.
-
-  private val predAlignedNum = (enqPtr + numTryEnq).value(log2Ceil(NumWriteBank) - 1, 0)
+  private val baseAlignedPtr = Wire(new IBufPtr)
+  private val alignedMask    = (~(NumWriteBank - 1).U(log2Ceil(Size).W)).asUInt
+  baseAlignedPtr       := (enqPtrDup(1) + numTryEnq)
+  baseAlignedPtr.value := (enqPtrDup(1) + numTryEnq).value & alignedMask
   when(io.in.fire && !io.flush) {
-    enqPtrVec           := VecInit(enqPtrVec.map(_ + numTryEnq))
-    ifuAlignedEnqPtrVec := VecInit(enqPtrVec.map(_ + numTryEnq - predAlignedNum))
+    enqPtrVec := VecInit(enqPtrVec.map(_ + numTryEnq))
+    enqPtrDup.map(_ := enqPtrDup(1) + numTryEnq)
+    ifuAlignedEnqPtrVec := VecInit((0 until EnqueueWidth).map(i => baseAlignedPtr + i.U))
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -338,7 +368,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   // Register the first encountered exceptions into the IBuffer.
   private val receiveExceptionFire = io.in.fire && !io.flush && !firstException.valid
   private val nextFirstHasException =
-    currentException.exceptionType.hasException && (!useBypass || useBypass && currentExceptionOffset >= DecodeWidth.U)
+    currentException.exceptionType.hasException && (!useBypass || useBypass && !bypassExceptionMask.reduce(_ || _))
 
   // When exceptions are registered in IBuffer, set firstHasExceptionExcludingRVCII.
   // We require numEnq to be non-zero to avoid the case when io.in.fire and numEnq is zero,
@@ -349,7 +379,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
 
   when(!firstException.valid) {
     firstException.bits := currentException
-    firstExceptionIdx   := ifuAlignedEnqPtrVec(io.in.bits.exceptionOffset)
+    firstExceptionIdx   := ifuAlignedEnqPtrVec(enqExceptionIndex)
   }
 
   // Dequeue the first encountered exceptions to outputEntries.
@@ -376,8 +406,9 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
 
   // Flush
   when(io.flush) {
-    allowEnq            := true.B
-    enqPtrVec           := enqPtrVec.indices.map(_.U.asTypeOf(new IBufPtr))
+    allowEnq  := true.B
+    enqPtrVec := enqPtrVec.indices.map(_.U.asTypeOf(new IBufPtr))
+    enqPtrDup.map(_ := 0.U.asTypeOf(new IBufPtr))
     ifuAlignedEnqPtrVec := ifuAlignedEnqPtrVec.indices.map(_.U.asTypeOf(new IBufPtr))
     deqBankPtrVec       := deqBankPtrVec.indices.map(_.U.asTypeOf(new IBufBankPtr))
     deqInBankPtr        := VecInit.fill(NumReadBank)(0.U.asTypeOf(new IBufInBankPtr))
